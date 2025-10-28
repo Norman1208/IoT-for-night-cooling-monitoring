@@ -3,36 +3,69 @@
 #include "DHTesp.h"
 #include "time.h"
 
-// WiFi credentials
+// ================== WiFi Config ==================
 #define WIFI_SSID "Longi Kost"
 #define WIFI_PASSWORD "eeee7777"
+// #define WIFI_SSID "RKS ROBOTIK"
+// #define WIFI_PASSWORD "RsupxRobotik2025"
 
-// Firebase info
+// ================== Firebase Info ==================
 #define DATABASE_URL "https://night-cooling-monitoring-default-rtdb.asia-southeast1.firebasedatabase.app/"
 
+// ================== DHT Setup ==================
 DHTesp dht1;
+DHTesp dht2;
 #define DHT_PIN1 32
+#define DHT_PIN2 33
 
-// NTP config
+// ================== NTP Config ==================
 const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 8 * 3600; // GMT+8
+const long gmtOffset_sec = 8 * 3600;  // GMT+8
 const int daylightOffset_sec = 0;
 
-String getTimestamp() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    return "1970-01-01 00:00:00";
-  }
+// ================== Helper Functions ==================
+String getTimestamp(struct tm timeinfo) {
   char buffer[25];
   strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
   return String(buffer);
 }
 
+void sendDataToFirebase(float t1, float h1, float t2, float h2, String timestamp) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    String url = String(DATABASE_URL) + "/nightCooling/device1.json";
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+
+    // JSON payload
+    String payload = "{";
+    payload += "\"sensor1\":{\"temperature\":" + String(t1, 2) + ",\"humidity\":" + String(h1, 2) + "},";
+    payload += "\"sensor2\":{\"temperature\":" + String(t2, 2) + ",\"humidity\":" + String(h2, 2) + "},";
+    payload += "\"timestamp\":\"" + timestamp + "\"";
+    payload += "}";
+
+    int httpResponseCode = http.PUT(payload);
+
+    if (httpResponseCode > 0) {
+      Serial.print("✅ Data sent to Firebase: ");
+      Serial.println(payload);
+    } else {
+      Serial.print("❌ Error sending: ");
+      Serial.println(http.errorToString(httpResponseCode));
+    }
+
+    http.end();
+  } else {
+    Serial.println("⚠️ WiFi not connected!");
+  }
+}
+
+// ================== Setup ==================
 void setup() {
   Serial.begin(115200);
 
-  // Init DHT
   dht1.setup(DHT_PIN1, DHTesp::DHT22);
+  dht2.setup(DHT_PIN2, DHTesp::DHT22);
 
   // Connect WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
@@ -41,45 +74,40 @@ void setup() {
     delay(500);
     Serial.print(".");
   }
-  Serial.println(" Connected!");
+  Serial.println(" ✅ Connected!");
 
   // Init NTP
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  Serial.println("NTP initialized, waiting for sync...");
 }
 
+// ================== Loop ==================
 void loop() {
-  TempAndHumidity data1 = dht1.getTempAndHumidity();
-  String timestamp = getTimestamp();
-
-  if (WiFi.status() == WL_CONNECTED) {
-    HTTPClient http;
-
-    // Push to Firebase under /nightCooling.json (no auth)
-    String url = String(DATABASE_URL) + "/nightCooling.json";
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-
-    // JSON payload
-    String payload = "{";
-    payload += "\"sensor1\":{\"temperature\":" + String(data1.temperature) +
-               ",\"humidity\":" + String(data1.humidity) + "},";
-    payload += "\"timestamp\":\"" + timestamp + "\"";
-    payload += "}";
-
-    int httpResponseCode = http.POST(payload);
-
-    if (httpResponseCode > 0) {
-      Serial.print("Data pushed, response: ");
-      Serial.println(httpResponseCode);
-      Serial.println(http.getString());
-    } else {
-      Serial.print("Error in sending POST: ");
-      Serial.println(http.errorToString(httpResponseCode));
-    }
-
-    http.end();
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println("❌ Failed to obtain time");
+    delay(1000);
+    return;
   }
 
-  Serial.println("Sensor 1 - Temp: " + String(data1.temperature, 2) + "°C Hum: " + String(data1.humidity, 2) + "%");
-  delay(10000); // every 10 sec
+  int seconds = timeinfo.tm_sec;
+
+  if (seconds == 0) {
+    // Read sensors
+    TempAndHumidity data1 = dht1.getTempAndHumidity();
+    TempAndHumidity data2 = dht2.getTempAndHumidity();
+    String timestamp = getTimestamp(timeinfo);
+
+    // Send data
+    sendDataToFirebase(data1.temperature, data1.humidity, data2.temperature, data2.humidity, timestamp);
+
+    // Print info
+    Serial.println("Sent at " + timestamp);
+    Serial.println("Sensor 1: " + String(data1.temperature, 2) + "°C, " + String(data1.humidity, 2) + "%");
+    Serial.println("Sensor 2: " + String(data2.temperature, 2) + "°C, " + String(data2.humidity, 2) + "%");
+
+    delay(1100); // Wait 1.1 sec to skip the next same-second trigger
+  }
+
+  delay(200); // Regular loop check
 }
